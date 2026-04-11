@@ -108,7 +108,7 @@ class PromptWidget(tk.Tk):
         self.remaining_seconds = 0
         self.loop_timer = tk.BooleanVar(value=True)
         self.shuffle_prompts = tk.BooleanVar(value=False)
-        self.timer_minutes = tk.DoubleVar(value=1.0)
+        self.timer_minutes = tk.DoubleVar(value=7.0)
         self.timer_action = tk.StringVar(value="prompt")
         self.selected_macro_name = tk.StringVar(value=self.macros[0].name if self.macros else "")
         self.insert_method = tk.StringVar(value="paste")
