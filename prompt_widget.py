@@ -106,16 +106,16 @@ class PromptWidget(tk.Tk):
         self.timer_job: str | None = None
         self.timer_paused = False
         self.remaining_seconds = 0
-        self.loop_timer = tk.BooleanVar(value=False)
+        self.loop_timer = tk.BooleanVar(value=True)
         self.shuffle_prompts = tk.BooleanVar(value=False)
         self.timer_minutes = tk.DoubleVar(value=1.0)
         self.timer_action = tk.StringVar(value="prompt")
         self.selected_macro_name = tk.StringVar(value=self.macros[0].name if self.macros else "")
         self.insert_method = tk.StringVar(value="paste")
-        self.press_enter_after_insert = tk.BooleanVar(value=False)
-        self.use_click_target = tk.BooleanVar(value=False)
-        self.click_x = tk.IntVar(value=0)
-        self.click_y = tk.IntVar(value=0)
+        self.press_enter_after_insert = tk.BooleanVar(value=True)
+        self.use_click_target = tk.BooleanVar(value=True)
+        self.click_x = tk.IntVar(value=420)
+        self.click_y = tk.IntVar(value=2000)
         self.mouse_position_var = tk.StringVar(value="Mouse: unavailable")
         self.capture_listener = None
         self.recording_macro = False
@@ -181,15 +181,14 @@ class PromptWidget(tk.Tk):
         for col in range(4):
             macro.columnconfigure(col, weight=1)
 
-        click = ttk.LabelFrame(main, text="Click Target Fallback", padding=8)
+        click = ttk.LabelFrame(main, text="Cursor Position for Prompt", padding=8)
         click.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(0, 8))
         ttk.Checkbutton(click, text="Click before paste", variable=self.use_click_target).grid(row=0, column=0, sticky="w")
         ttk.Label(click, text="X").grid(row=0, column=1, sticky="e", padx=(12, 4))
         ttk.Spinbox(click, from_=0, to=10000, textvariable=self.click_x, width=6).grid(row=0, column=2, sticky="w")
         ttk.Label(click, text="Y").grid(row=0, column=3, sticky="e", padx=(12, 4))
         ttk.Spinbox(click, from_=0, to=10000, textvariable=self.click_y, width=6).grid(row=0, column=4, sticky="w")
-        ttk.Button(click, text="Use Current Mouse Position", command=self.capture_mouse_position).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0), padx=(0, 4))
-        ttk.Button(click, text="Click to Set Target", command=self.arm_click_capture).grid(row=1, column=2, columnspan=3, sticky="ew", pady=(8, 0), padx=(4, 0))
+        ttk.Button(click, text="Click to Set Target", command=self.arm_click_capture).grid(row=1, column=0, columnspan=5, sticky="ew", pady=(8, 0))
         ttk.Label(click, textvariable=self.mouse_position_var).grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
         ttk.Label(main, textvariable=self.status_var, wraplength=420).grid(row=8, column=0, columnspan=4, sticky="ew")
