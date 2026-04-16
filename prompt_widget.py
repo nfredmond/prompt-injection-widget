@@ -14,9 +14,12 @@ import os
 import random
 import sys
 import threading
+import shutil
+import subprocess
 import time
 import tkinter as tk
 from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -130,6 +133,20 @@ log = setup_logging()
 class Prompt:
     name: str
     body: str
+    # Per-prompt overrides. Empty string means "use the app default".
+    # insert_override: "" | "paste" | "type"
+    # enter_override:  "" | "yes"   | "no"
+    insert_override: str = ""
+    enter_override: str = ""
+
+
+def _prompt_from_dict(item: dict) -> Prompt:
+    return Prompt(
+        name=item["name"],
+        body=item["body"],
+        insert_override=str(item.get("insert_override", "") or ""),
+        enter_override=str(item.get("enter_override", "") or ""),
+    )
 
 
 @dataclass
@@ -177,7 +194,7 @@ def load_prompts() -> list[Prompt]:
         return prompts
     try:
         data = json.loads(PROMPTS_FILE.read_text(encoding="utf-8"))
-        return [Prompt(name=item["name"], body=item["body"]) for item in data]
+        return [_prompt_from_dict(item) for item in data]
     except Exception as exc:
         log.exception("load_prompts failed")
         messagebox.showwarning("Prompt load failed", f"Using defaults because prompts could not be loaded:\n{exc}")
@@ -247,6 +264,26 @@ def detect_session() -> str:
     if os.environ.get("DISPLAY"):
         return "x11"
     return "unknown"
+
+
+def ydotool_available() -> bool:
+    return shutil.which("ydotool") is not None
+
+
+def ydotool_run(args: list[str]) -> bool:
+    """Run ydotool with args. Returns True on success, False on failure."""
+    try:
+        subprocess.run(
+            ["ydotool", *args],
+            check=True,
+            timeout=5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        log.warning("ydotool failed: %s", exc)
+        return False
 
 
 def any_modifier_held() -> bool:
@@ -543,6 +580,28 @@ class SegmentClock(tk.Canvas):
 
 # region Dialogs ======================================================================
 
+_INSERT_OVERRIDE_LABELS = {"": "Use default", "paste": "Paste with Ctrl+V", "type": "Type text"}
+_INSERT_OVERRIDE_VALUES = {v: k for k, v in _INSERT_OVERRIDE_LABELS.items()}
+_ENTER_OVERRIDE_LABELS = {"": "Use default", "yes": "Yes", "no": "No"}
+_ENTER_OVERRIDE_VALUES = {v: k for k, v in _ENTER_OVERRIDE_LABELS.items()}
+
+
+def _override_label_insert(value: str) -> str:
+    return _INSERT_OVERRIDE_LABELS.get(value, "Use default")
+
+
+def _override_value_insert(label: str) -> str:
+    return _INSERT_OVERRIDE_VALUES.get(label, "")
+
+
+def _override_label_enter(value: str) -> str:
+    return _ENTER_OVERRIDE_LABELS.get(value, "Use default")
+
+
+def _override_value_enter(label: str) -> str:
+    return _ENTER_OVERRIDE_VALUES.get(label, "")
+
+
 class PromptDialog(simpledialog.Dialog):
     def __init__(self, parent: tk.Widget, title: str, prompt: Prompt | None = None) -> None:
         self.prompt = prompt
@@ -559,6 +618,33 @@ class PromptDialog(simpledialog.Dialog):
         self.text.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
         if self.prompt:
             self.text.insert("1.0", self.prompt.body)
+
+        overrides = ttk.LabelFrame(master, text="Overrides (optional)")
+        overrides.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+        overrides.columnconfigure(1, weight=1)
+
+        ttk.Label(overrides, text="Insert method").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        self.insert_override_var = tk.StringVar(value=self.prompt.insert_override if self.prompt else "")
+        insert_combo = ttk.Combobox(
+            overrides,
+            textvariable=self.insert_override_var,
+            values=["Use default", "Paste with Ctrl+V", "Type text"],
+            state="readonly",
+        )
+        insert_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
+        insert_combo.set(_override_label_insert(self.insert_override_var.get()))
+
+        ttk.Label(overrides, text="Enter after send").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        self.enter_override_var = tk.StringVar(value=self.prompt.enter_override if self.prompt else "")
+        enter_combo = ttk.Combobox(
+            overrides,
+            textvariable=self.enter_override_var,
+            values=["Use default", "Yes", "No"],
+            state="readonly",
+        )
+        enter_combo.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=4)
+        enter_combo.set(_override_label_enter(self.enter_override_var.get()))
+
         master.columnconfigure(0, weight=1)
         master.rowconfigure(3, weight=1)
         return name_entry
@@ -569,7 +655,12 @@ class PromptDialog(simpledialog.Dialog):
         if not name or not body:
             messagebox.showerror("Missing prompt", "Both name and prompt text are required.", parent=self)
             return False
-        self.result = Prompt(name=name, body=body)
+        self.result = Prompt(
+            name=name,
+            body=body,
+            insert_override=_override_value_insert(self.insert_override_var.get()),
+            enter_override=_override_value_enter(self.enter_override_var.get()),
+        )
         return True
 
 
@@ -643,7 +734,6 @@ class PromptWidget(tk.Tk):
         self.mouse_position_var = tk.StringVar(value="Live mouse: unavailable")
         self.countdown_var = tk.StringVar(value=format_seconds(self.settings.timer_seconds))
         self.status_var = tk.StringVar(value="Ready. Select a prompt, then start the timer.")
-        self.macro_detail_var = tk.StringVar(value="")
 
         self.timer_job: str | None = None
         self.timer_paused = False
@@ -691,11 +781,15 @@ class PromptWidget(tk.Tk):
         if self.settings.last_tab and 0 <= self.settings.last_tab < len(self.notebook.tabs()):
             self.notebook.select(self.settings.last_tab)
 
-        session = detect_session()
-        log.info("launched session=%s pynput=%s", session, PYNPUT_AVAILABLE)
-        if session == "wayland" and not self.settings.wayland_warned:
+        self.session = detect_session()
+        self.use_ydotool = self.session == "wayland" and ydotool_available()
+        log.info(
+            "launched session=%s pynput=%s ydotool=%s",
+            self.session, PYNPUT_AVAILABLE, self.use_ydotool,
+        )
+        if self.session == "wayland" and not self.settings.wayland_warned:
             self.after(400, self._show_wayland_advisory)
-        elif session == "unknown":
+        elif self.session == "unknown":
             self.set_status("Warning: no X11/Wayland display detected. Paste/mouse features unavailable.", "warn")
 
     def on_close(self) -> None:
@@ -717,15 +811,27 @@ class PromptWidget(tk.Tk):
         self.destroy()
 
     def _show_wayland_advisory(self) -> None:
-        messagebox.showwarning(
-            "Wayland session detected",
-            "You appear to be running Wayland.\n\n"
-            "This app uses pynput to move the mouse and send Ctrl+V. "
-            "On Wayland, these calls often fail silently — timer paste, macro playback, "
-            "and click-target may not work.\n\n"
-            "For reliable use, switch to an X11 session at the login screen.",
-            parent=self,
-        )
+        if self.use_ydotool:
+            body = (
+                "You're running Wayland.\n\n"
+                "ydotool was found on PATH — the widget will route Ctrl+V and Enter "
+                "through it for timer paste. Make sure ydotoold is running, e.g.:\n\n"
+                "    systemctl --user start ydotoold\n\n"
+                "Mouse-position features (click-target, macro playback) still rely "
+                "on pynput and may not work on Wayland. Switch to X11 for full "
+                "functionality."
+            )
+        else:
+            body = (
+                "You appear to be running Wayland.\n\n"
+                "This app uses pynput to move the mouse and send Ctrl+V. "
+                "On Wayland, these calls often fail silently — timer paste, macro "
+                "playback, and click-target may not work.\n\n"
+                "Install ydotool and start its daemon (systemctl --user start ydotoold) "
+                "to recover paste and Enter, or switch to an X11 session for full "
+                "functionality."
+            )
+        messagebox.showwarning("Wayland session detected", body, parent=self)
         self.settings.wayland_warned = True
         save_settings(self.settings)
 
@@ -818,14 +924,17 @@ class PromptWidget(tk.Tk):
                 highlightcolor=p["accent"],
             )
 
-        macro_detail = getattr(self, "macro_detail", None)
-        if macro_detail is not None:
-            macro_detail.configure(
+        macro_steps = getattr(self, "macro_steps", None)
+        if macro_steps is not None:
+            macro_steps.configure(
                 bg=p["bg_alt"],
-                fg=p["fg_muted"],
+                fg=p["fg"],
+                selectbackground=p["select_bg"],
+                selectforeground=p["select_fg"],
+                highlightbackground=p["border"],
+                highlightcolor=p["accent"],
                 borderwidth=1,
                 relief="solid",
-                highlightbackground=p["border"],
             )
 
         for tip in Tooltip._active:
@@ -941,8 +1050,20 @@ class PromptWidget(tk.Tk):
         preview_scroll.grid(row=0, column=1, sticky="ns")
         self.preview.configure(yscrollcommand=preview_scroll.set)
 
+        tokens_hint = ttk.Label(
+            parent,
+            text="Tokens: {date} {time} {datetime} {weekday} {clipboard} {prompt_name}",
+            style="Muted.TLabel",
+        )
+        tokens_hint.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        Tooltip(
+            tokens_hint,
+            "These placeholders get expanded when the prompt is sent.\n"
+            "Edit a prompt and type e.g. 'It is {time} on {weekday}.' to see it fill in.",
+        )
+
         btn_row = ttk.Frame(parent)
-        btn_row.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        btn_row.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         for col in range(5):
             btn_row.columnconfigure(col, weight=1)
         add_btn = ttk.Button(btn_row, text="Add", command=self.add_prompt)
@@ -1071,16 +1192,36 @@ class PromptWidget(tk.Tk):
         test_btn.grid(row=0, column=0, sticky="w")
         Tooltip(test_btn, "Play the selected macro once right now, without the timer")
 
-        ttk.Label(parent, text="Actions", style="Muted.TLabel").grid(row=3, column=0, sticky="nw", pady=(10, 2))
+        header_row = ttk.Frame(parent)
+        header_row.grid(row=3, column=0, sticky="ew", pady=(10, 2))
+        header_row.columnconfigure(0, weight=1)
+        ttk.Label(header_row, text="Steps", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+        self.macro_step_summary = ttk.Label(header_row, text="", style="Muted.TLabel")
+        self.macro_step_summary.grid(row=0, column=1, sticky="e")
+
         detail_frame = ttk.Frame(parent)
         detail_frame.grid(row=4, column=0, sticky="nsew")
         detail_frame.columnconfigure(0, weight=1)
         detail_frame.rowconfigure(0, weight=1)
-        self.macro_detail = tk.Text(detail_frame, height=12, wrap="none", state="disabled")
-        self.macro_detail.grid(row=0, column=0, sticky="nsew")
-        detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=self.macro_detail.yview)
+        self.macro_steps = tk.Listbox(detail_frame, height=10, exportselection=False, activestyle="dotbox")
+        self.macro_steps.grid(row=0, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=self.macro_steps.yview)
         detail_scroll.grid(row=0, column=1, sticky="ns")
-        self.macro_detail.configure(yscrollcommand=detail_scroll.set)
+        self.macro_steps.configure(yscrollcommand=detail_scroll.set)
+
+        step_btn_row = ttk.Frame(parent)
+        step_btn_row.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+        for col in range(3):
+            step_btn_row.columnconfigure(col, weight=1)
+        del_step_btn = ttk.Button(step_btn_row, text="Delete step", command=self.delete_macro_step)
+        up_step_btn = ttk.Button(step_btn_row, text="Move up", command=lambda: self.move_macro_step(-1))
+        down_step_btn = ttk.Button(step_btn_row, text="Move down", command=lambda: self.move_macro_step(1))
+        del_step_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        up_step_btn.grid(row=0, column=1, sticky="ew", padx=4)
+        down_step_btn.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        Tooltip(del_step_btn, "Remove the selected step from this macro")
+        Tooltip(up_step_btn, "Swap with the step above (its delay moves with it)")
+        Tooltip(down_step_btn, "Swap with the step below")
 
     def _build_settings_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -1281,7 +1422,12 @@ class PromptWidget(tk.Tk):
             return
         original = self.prompts[idx]
         new_name = self._unique_prompt_name(f"{original.name} (copy)")
-        new_prompt = Prompt(name=new_name, body=original.body)
+        new_prompt = Prompt(
+            name=new_name,
+            body=original.body,
+            insert_override=original.insert_override,
+            enter_override=original.enter_override,
+        )
         self.prompts.insert(idx + 1, new_prompt)
         save_prompts(self.prompts)
         self.refresh_list()
@@ -1394,7 +1540,7 @@ class PromptWidget(tk.Tk):
         kind = entry.get("kind")
         if kind == "prompt_delete":
             prompt_data = entry["prompt"]
-            prompt = Prompt(name=prompt_data["name"], body=prompt_data["body"])
+            prompt = _prompt_from_dict(prompt_data)
             insert_at = min(int(entry["index"]), len(self.prompts))
             self.prompts.insert(insert_at, prompt)
             save_prompts(self.prompts)
@@ -1458,7 +1604,14 @@ class PromptWidget(tk.Tk):
                 body = str(item.get("body", "")).strip()
                 if not name or not body:
                     continue
-                self.prompts.append(Prompt(name=self._unique_prompt_name(name), body=body))
+                self.prompts.append(
+                    Prompt(
+                        name=self._unique_prompt_name(name),
+                        body=body,
+                        insert_override=str(item.get("insert_override", "") or ""),
+                        enter_override=str(item.get("enter_override", "") or ""),
+                    )
+                )
                 added += 1
             save_prompts(self.prompts)
             self.refresh_list()
@@ -1516,30 +1669,73 @@ class PromptWidget(tk.Tk):
 
     def refresh_macro_detail(self) -> None:
         macro = self.selected_macro()
-        self.macro_detail.configure(state="normal")
-        self.macro_detail.delete("1.0", "end")
+        self.macro_steps.delete(0, "end")
         if not macro:
-            self.macro_detail.insert("1.0", "(no macro selected)")
-        else:
-            lines = [f"Macro: {macro.name}", f"Actions: {len(macro.actions)}", "-" * 40]
-            for i, action in enumerate(macro.actions[:40]):
-                kind = action.get("kind", "?")
-                delay = float(action.get("delay", 0.0))
-                if kind == "mouse_click":
-                    btn = action.get("button", "?")
-                    x = action.get("x", "?")
-                    y = action.get("y", "?")
-                    pressed = "press" if action.get("pressed") else "release"
-                    lines.append(f"{i+1:>3}. +{delay:5.2f}s mouse {btn} {pressed} at ({x},{y})")
-                elif kind in ("key_press", "key_release"):
-                    key = action.get("key", "?")
-                    lines.append(f"{i+1:>3}. +{delay:5.2f}s {kind} {key}")
-                else:
-                    lines.append(f"{i+1:>3}. +{delay:5.2f}s {kind}")
-            if len(macro.actions) > 40:
-                lines.append(f"... ({len(macro.actions) - 40} more)")
-            self.macro_detail.insert("1.0", "\n".join(lines))
-        self.macro_detail.configure(state="disabled")
+            self.macro_steps.insert("end", "(no macro selected)")
+            self.macro_step_summary.configure(text="")
+            return
+        for i, action in enumerate(macro.actions):
+            self.macro_steps.insert("end", self._format_macro_step(i, action))
+        self.macro_step_summary.configure(text=f"{macro.name} — {len(macro.actions)} step(s)")
+
+    @staticmethod
+    def _format_macro_step(index: int, action: dict) -> str:
+        kind = action.get("kind", "?")
+        delay = float(action.get("delay", 0.0))
+        if kind == "mouse_click":
+            btn = action.get("button", "?")
+            x = action.get("x", "?")
+            y = action.get("y", "?")
+            pressed = "press" if action.get("pressed") else "release"
+            return f"{index+1:>3}. +{delay:5.2f}s  mouse {btn} {pressed} at ({x},{y})"
+        if kind in ("key_press", "key_release"):
+            key = action.get("key", "?")
+            return f"{index+1:>3}. +{delay:5.2f}s  {kind} {key}"
+        return f"{index+1:>3}. +{delay:5.2f}s  {kind}"
+
+    def _selected_macro_step(self) -> int | None:
+        sel = self.macro_steps.curselection()
+        if not sel:
+            return None
+        macro = self.selected_macro()
+        if not macro:
+            return None
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(macro.actions):
+            return None
+        return idx
+
+    def delete_macro_step(self) -> None:
+        macro = self.selected_macro()
+        idx = self._selected_macro_step()
+        if not macro or idx is None:
+            self.set_status("Select a step to delete.", "warn")
+            return
+        del macro.actions[idx]
+        save_macros(self.macros)
+        self.refresh_macro_detail()
+        if macro.actions:
+            new_pos = min(idx, len(macro.actions) - 1)
+            self.macro_steps.selection_set(new_pos)
+            self.macro_steps.activate(new_pos)
+            self.macro_steps.see(new_pos)
+        self.set_status("Step removed.", "ok")
+
+    def move_macro_step(self, direction: int) -> None:
+        macro = self.selected_macro()
+        idx = self._selected_macro_step()
+        if not macro or idx is None:
+            self.set_status("Select a step to move.", "warn")
+            return
+        target = idx + direction
+        if target < 0 or target >= len(macro.actions):
+            return
+        macro.actions[idx], macro.actions[target] = macro.actions[target], macro.actions[idx]
+        save_macros(self.macros)
+        self.refresh_macro_detail()
+        self.macro_steps.selection_set(target)
+        self.macro_steps.activate(target)
+        self.macro_steps.see(target)
 
     def selected_macro(self) -> Macro | None:
         selected_name = self.selected_macro_name.get()
@@ -1858,7 +2054,7 @@ class PromptWidget(tk.Tk):
             return
         if self.timer_action_uses_prompt() and (not self.keyboard or not Key):
             if prompt:
-                self.copy_to_clipboard(prompt.body)
+                self.copy_to_clipboard(self._expand_template(prompt.body, prompt))
             self.set_status("pynput unavailable: prompt copied to clipboard, but paste not sent.", "err")
             return
         if self.timer_action_uses_macro() and not self.can_play_macro(macro):
@@ -1951,26 +2147,65 @@ class PromptWidget(tk.Tk):
         saved_clipboard: str | None = None
         if self.restore_clipboard_var.get():
             saved_clipboard = self._read_clipboard()
-        self._write_clipboard(prompt.body)
+        body = self._expand_template(prompt.body, prompt, clipboard_snapshot=saved_clipboard)
+        method = prompt.insert_override or self.insert_method.get()
+        press_enter = (
+            prompt.enter_override == "yes"
+            if prompt.enter_override
+            else self.press_enter_after_insert.get()
+        )
+        self._write_clipboard(body)
         time.sleep(0.05)
         if self.use_click_target.get() and self.mouse and Button:
             self.mouse.position = (int(self.click_x.get()), int(self.click_y.get()))
             self.mouse.click(Button.left, 1)
             time.sleep(0.08)
-        if self.insert_method.get() == "type":
-            self.keyboard.type(prompt.body)
+        if method == "type":
+            if self.use_ydotool and ydotool_run(["type", body]):
+                pass
+            else:
+                self.keyboard.type(body)
         else:
-            self.keyboard.press(Key.ctrl)
-            self.keyboard.press("v")
-            self.keyboard.release("v")
-            self.keyboard.release(Key.ctrl)
-        if self.press_enter_after_insert.get():
+            if self.use_ydotool and ydotool_run(["key", "29:1", "47:1", "47:0", "29:0"]):
+                pass
+            else:
+                self.keyboard.press(Key.ctrl)
+                self.keyboard.press("v")
+                self.keyboard.release("v")
+                self.keyboard.release(Key.ctrl)
+        if press_enter:
             time.sleep(0.05)
-            self.keyboard.press(Key.enter)
-            self.keyboard.release(Key.enter)
+            if self.use_ydotool and ydotool_run(["key", "28:1", "28:0"]):
+                pass
+            else:
+                self.keyboard.press(Key.enter)
+                self.keyboard.release(Key.enter)
         if saved_clipboard is not None:
             time.sleep(1.0)
             self.after(0, lambda c=saved_clipboard: self._write_clipboard(c))
+
+    def _expand_template(
+        self,
+        text: str,
+        prompt: Prompt | None = None,
+        clipboard_snapshot: str | None = None,
+    ) -> str:
+        if "{" not in text:
+            return text
+        now = datetime.now()
+        if clipboard_snapshot is None:
+            clipboard_snapshot = self._read_clipboard() or ""
+        replacements = {
+            "{date}": now.strftime("%Y-%m-%d"),
+            "{time}": now.strftime("%H:%M"),
+            "{datetime}": now.strftime("%Y-%m-%d %H:%M"),
+            "{weekday}": now.strftime("%A"),
+            "{clipboard}": clipboard_snapshot,
+            "{prompt_name}": prompt.name if prompt else "",
+        }
+        for token, value in replacements.items():
+            text = text.replace(token, value)
+        return text
 
     # endregion
 

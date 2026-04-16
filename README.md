@@ -53,6 +53,38 @@ The window title mirrors state: `Prompt Widget — 4:23`, `— paused 4:23`, or
 The widget stays on top by default. Toggle this off in Settings if you want
 other windows to cover it.
 
+## Prompt templating
+
+Prompts expand a few placeholder tokens at send time — useful for stamping the
+current date or feeding whatever is currently on the clipboard into the target
+app.
+
+| Token | Expands to |
+| --- | --- |
+| `{date}` | `2026-04-16` (ISO local date) |
+| `{time}` | `14:30` |
+| `{datetime}` | `2026-04-16 14:30` |
+| `{weekday}` | `Thursday` |
+| `{clipboard}` | Whatever was on the clipboard when the prompt fired |
+| `{prompt_name}` | The name of the prompt being sent |
+
+Tokens expand only at send time. The preview pane keeps them literal so you can
+see and edit them. `{clipboard}` uses the snapshot saved for clipboard restore —
+so an `{clipboard}` prompt will pick up the user's copied text, not the prompt's
+own body.
+
+## Per-prompt overrides
+
+Each prompt can override the two global send options when it needs to behave
+differently from the rest:
+
+- **Insert method** — force `Paste with Ctrl+V` or `Type text` regardless of
+  the Timer tab's global choice.
+- **Enter after send** — force Enter on or off for this prompt.
+
+Open a prompt via Edit (or `Ctrl+E`), set the overrides in the dialog, and save.
+Both default to `Use default`, meaning the Timer tab's settings apply.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
@@ -87,6 +119,10 @@ to disable. The combo uses `pynput` syntax (e.g. `<alt>+<f9>`).
 
 Macros run in a background thread so the UI and countdown stay responsive
 even during long playback.
+
+The Macros tab shows every recorded step in order, with its relative delay and
+kind. Select a row and use `Delete step` to drop a stray click, or `Move up` /
+`Move down` to reorder. Changes save to disk immediately.
 
 ## Cursor Position for Prompt
 
@@ -139,8 +175,11 @@ the checkout.
 
 - **Wayland:** `pynput`'s mouse-position query and synthetic Ctrl+V injection
   tend to fail silently on Wayland. The widget detects Wayland sessions and
-  shows a one-time advisory. Switch to an X11 session for reliable macros
-  and click-targets.
+  shows a one-time advisory. If `ydotool` is on `PATH`, the widget routes
+  paste (Ctrl+V) and Enter through it instead — install `ydotool` and start
+  the daemon with `systemctl --user start ydotoold`. Mouse-position features
+  (click-target, macro playback) still rely on pynput and need X11 to work
+  reliably.
 - **Locked-down apps** (some Electron builds, Steam overlays, remote desktop
   clients) may ignore synthetic key events regardless of session type. Use
   `Type text` instead of `Paste with Ctrl+V`, or record a macro that clicks
