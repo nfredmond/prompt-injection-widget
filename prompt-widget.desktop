@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Prompt Widget
+GenericName=Prompt Injector
+Comment=Local desktop widget for replaying saved prompts into focused apps
+Exec=/home/narford/code/prompt-injection-widget/run.sh
+Icon=/home/narford/code/prompt-injection-widget/assets/icon.png
+Terminal=false
+Categories=Utility;TextTools;
+Keywords=prompt;macro;paste;automation;
+StartupWMClass=prompt_widget.py
